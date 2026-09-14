@@ -23,7 +23,6 @@ async function startBot() {
             logger: pino({ level: 'silent' }),
             printQRInTerminal: false,
             auth: state,
-            // YAHAN CHROME UBUNTU DENA ZAROORI HAI, WARNA PAIRING CODE ERROR DEGA
             browser: Browsers.ubuntu('Chrome') 
         });
 
@@ -34,14 +33,13 @@ async function startBot() {
             
             if (qr) {
                 qrCodeUrl = await qrcode.toDataURL(qr);
-                console.log('Naya QR generate hua hai.');
             }
 
             if (connection === 'close') {
                 const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
                 botReady = false;
                 if (shouldReconnect) {
-                    setTimeout(startBot, 3000); // Auto-reconnect
+                    setTimeout(startBot, 3000); 
                 }
             } else if (connection === 'open') {
                 botReady = true;
@@ -59,34 +57,49 @@ async function startBot() {
             const text = m.message.conversation || m.message.extendedTextMessage?.text;
             if (!text) return;
 
-            try {
-                const delay = (ms) => new Promise(res => setTimeout(res, ms));
-                const remoteJid = m.key.remoteJid;
-                const isGroup = remoteJid.includes('@g.us');
-                
-                await delay(2000 + Math.random() * 3000); // Padhne ka wait
-                await sock.readMessages([m.key]); // Blue tick
+            const remoteJid = m.key.remoteJid;
+            const isGroup = remoteJid.includes('@g.us');
+            const delay = (ms) => new Promise(res => setTimeout(res, ms));
 
+            try {
+                // 1. Padhne ka wait (Thoda late blue tick hoga: 3 se 5 second)
+                await delay(3000 + Math.random() * 2000);
+                
+                // 2. Blue Tick (Mark as read)
+                await sock.readMessages([m.key]);
+
+                // 3. Read karne ke baad thoda rukna (1-2 second)
+                await delay(1000 + Math.random() * 1000);
+
+                // 4. Typing on kar dena (AI sochne se pehle hi typing dikhne lagega)
+                await sock.sendPresenceUpdate('composing', remoteJid);
+
+                // 5. AI se reply maangna
                 const ai = new GoogleGenAI({ apiKey: geminiApiKey });
                 const context = isGroup ? "group chat mein" : "personal chat mein";
                 const prompt = `Tum mere ek human dost ho. Ye baat ${context} ho rahi hai. 
                 Message: "${text}". 
-                Ek chhota, natural, aur hinglish reply do. Aisa lage ki ek asli insaan bina soche normally type kar raha hai.`;
+                Ek chhota, natural, aur hinglish reply do. Aisa lage ki ek asli insaan bina soche normally type kar raha hai. Zyada lamba reply mat dena.`;
                 
+                // YAHAN GALTI THI JO AB THEEK KAR DI GAYI HAI (gemini-1.5-flash)
                 const response = await ai.models.generateContent({
-                    model: 'gemini-2.5-flash',
+                    model: 'gemini-1.5-flash',
                     contents: prompt
                 });
                 const replyText = response.text;
 
-                await sock.sendPresenceUpdate('composing', remoteJid); // Typing...
-                await delay(Math.min(replyText.length * 60, 5000)); // Likhne ka wait
+                // 6. Text lamba hai toh thoda aur typing dikhana (Insaan ki tarah)
+                const extraTypingTime = Math.min(replyText.length * 40, 4000); 
+                await delay(extraTypingTime);
 
+                // 7. Message send karna
                 await sock.sendMessage(remoteJid, { text: replyText }, { quoted: m });
-                await sock.sendPresenceUpdate('paused', remoteJid);
                 
             } catch (e) {
                 console.error('Error in replying:', e);
+            } finally {
+                // 8. Kaam khatam hone par typing status off karna
+                await sock.sendPresenceUpdate('paused', remoteJid);
             }
         });
     } catch (error) {
@@ -148,7 +161,6 @@ app.post('/pair', async (req, res) => {
             await delay(1500); 
             code = await sock.requestPairingCode(phone);
         } catch (err) {
-            // Agar Connection timeout ho gaya ho, toh auto-restart karke code fetch karega
             if (err.message.includes('Closed') || err.message.includes('closed')) {
                 startBot();
                 await delay(4000); 
@@ -158,7 +170,6 @@ app.post('/pair', async (req, res) => {
             }
         }
         
-        // Code ko '1234-5678' style me dikhane ke liye
         const formattedCode = code.match(/.{1,4}/g).join('-');
         
         res.send(`
