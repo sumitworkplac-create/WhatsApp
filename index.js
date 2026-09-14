@@ -30,21 +30,16 @@ async function startBot() {
 
         sock.ev.on('connection.update', async (update) => {
             const { connection, lastDisconnect, qr } = update;
+            if (qr) qrCodeUrl = await qrcode.toDataURL(qr);
             
-            if (qr) {
-                qrCodeUrl = await qrcode.toDataURL(qr);
-            }
-
             if (connection === 'close') {
                 const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
                 botReady = false;
-                if (shouldReconnect) {
-                    setTimeout(startBot, 3000); 
-                }
+                if (shouldReconnect) setTimeout(startBot, 3000); 
             } else if (connection === 'open') {
                 botReady = true;
                 qrCodeUrl = null;
-                console.log('✅ Bot WhatsApp se connect ho gaya hai!');
+                console.log('✅ Bot WhatsApp se connect ho gaya!');
             }
         });
 
@@ -52,6 +47,7 @@ async function startBot() {
             if (type !== 'notify') return;
             const m = messages[0];
             
+            // Khud ke messages aur bina API key wale ignore
             if (!m.message || m.key.fromMe || !geminiApiKey) return;
 
             const text = m.message.conversation || m.message.extendedTextMessage?.text;
@@ -59,52 +55,47 @@ async function startBot() {
 
             const remoteJid = m.key.remoteJid;
             const isGroup = remoteJid.includes('@g.us');
-            const delay = (ms) => new Promise(res => setTimeout(res, ms));
 
             try {
-                // 1. Padhne ka wait (Thoda late blue tick hoga)
-                await delay(2000 + Math.random() * 2000);
+                // 1. Padhne ka natak aur Blue Tick
+                await new Promise(r => setTimeout(r, 2000));
                 await sock.readMessages([m.key]);
 
+                // 🛠️ DEBUG TEST: Pata karne ke liye ki WhatsApp send chal raha hai ya nahi
+                if (text.toLowerCase() === '!ping') {
+                    await sock.sendMessage(remoteJid, { text: 'Pong! 🟢 Bot ka WhatsApp system bilkul sahi chal raha hai.' }, { quoted: m });
+                    return;
+                }
+
                 // 2. Typing start karna
-                await delay(1000);
                 await sock.sendPresenceUpdate('composing', remoteJid);
-
-                // 3. AI Setup (Nayi aur stable library)
-                const genAI = new GoogleGenerativeAI(geminiApiKey);
-                const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-
-                // 4. Strict Human Prompt (Bilkul insaan banne ki warning)
-                const context = isGroup ? "group chat" : "personal chat";
-                const prompt = `Tum ek asli insaan (Indian) ho, tum koi AI ya chatbot nahi ho. 
-                Tum apne doston ke sath WhatsApp par ${context} me baat kar rahe ho.
                 
-                Rules:
-                1. Kabhi bhi mat bolna ki tum AI ho ya madad karne ke liye ho.
-                2. Tumhara reply bahut chhota aur casual Hinglish mein hona chahiye (jaise log real mein chat karte hain).
-                3. Agar koi "hello", "hi", "kya haal hai" bole, toh usko normal reply do (jaise: "haan bhai bol", "sab badiya tu bata", "kya hua?").
-                4. Formal mat hona aur zyada punctuation (!, ?) ka use mat karna.
+                let replyText = "";
                 
-                Dost ka message: "${text}"
-                Tumhara reply:`;
-                
-                const result = await model.generateContent(prompt);
-                let replyText = result.response.text().trim();
-                
-                // Agar AI galti se quotes laga de to unhe hata dena
-                replyText = replyText.replace(/^["']|["']$/g, '');
+                try {
+                    // 3. AI se reply maangna
+                    const genAI = new GoogleGenerativeAI(geminiApiKey);
+                    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+                    
+                    const prompt = `Tum ek asli Indian insaan ho. Dost ka message: "${text}". Ek chhota, natural, aur casual Hinglish reply do (jaise "haan bhai", "kya chal raha hai"). Kabhi mat bolna ki tum AI ho.`;
+                    
+                    const result = await model.generateContent(prompt);
+                    replyText = result.response.text().trim().replace(/^["']|["']$/g, '');
+                    
+                } catch (aiError) {
+                    console.error('AI Error:', aiError);
+                    // ⚠️ AGAR API KHARAB HUI TOH YE MESSAGE JAYEGA
+                    replyText = "⚠️ Gemini API Error: Bhai teri Gemini API key kaam nahi kar rahi hai. Ya toh key galat copy hui hai, ya uski limit cross ho gayi hai.";
+                }
 
-                // 5. Insaan jaisa typing delay
-                const extraTypingTime = Math.min(replyText.length * 40, 4000); 
-                await delay(extraTypingTime);
-
-                // 6. Message bhej dena
+                // 4. Insaan jaisa rukna aur message bhejna
+                await new Promise(r => setTimeout(r, 2000));
                 await sock.sendMessage(remoteJid, { text: replyText }, { quoted: m });
                 
             } catch (e) {
-                console.error('AI Error:', e);
+                console.error('WhatsApp Error:', e);
             } finally {
-                // 7. Kaam khatam hone par typing off
+                // 5. Typing off
                 await sock.sendPresenceUpdate('paused', remoteJid);
             }
         });
@@ -137,7 +128,6 @@ app.get('/', (req, res) => {
             ${qrCodeUrl ? `
                 <h2>Option 1: QR Scan Karein</h2>
                 <img src="${qrCodeUrl}" style="width: 250px; height: 250px;" />
-                <p style="color: red; font-size: 14px;">(Agar scan na ho to ek baar page refresh karke turant scan karein)</p>
             ` : '<h3>System Loading... 5 seconds mein refresh karein</h3>'}
             <hr style="margin: 30px 0;">
             <h2>Option 2: Number se Pair Karein</h2>
@@ -150,7 +140,7 @@ app.get('/', (req, res) => {
 });
 
 app.post('/save-api', (req, res) => {
-    geminiApiKey = req.body.apikey;
+    geminiApiKey = req.body.apikey.trim(); // Space hatane ke liye trim lagaya hai
     startBot(); 
     res.redirect('/');
 });
