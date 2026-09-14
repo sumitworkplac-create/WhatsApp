@@ -1,8 +1,9 @@
 const express = require('express');
 const qrcode = require('qrcode');
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, Browsers } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
+const fs = require('fs'); // Files delete karne ke liye zaroori
 
 const app = express();
 app.use(express.urlencoded({ extended: true }));
@@ -23,7 +24,8 @@ async function startBot() {
             logger: pino({ level: 'silent' }),
             printQRInTerminal: false,
             auth: state,
-            browser: Browsers.ubuntu('Chrome') 
+            // Yahan browser setting update ki hai taaki pairing code hamesha generate ho
+            browser: ['Ubuntu', 'Chrome', '110.0.5481.192'] 
         });
 
         sock.ev.on('creds.update', saveCreds);
@@ -33,9 +35,16 @@ async function startBot() {
             if (qr) qrCodeUrl = await qrcode.toDataURL(qr);
             
             if (connection === 'close') {
-                const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+                const statusCode = lastDisconnect?.error?.output?.statusCode;
+                const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
                 botReady = false;
-                if (shouldReconnect) setTimeout(startBot, 3000); 
+                
+                if (shouldReconnect) {
+                    setTimeout(startBot, 3000); 
+                } else {
+                    // Agar logout ho jaye to purani file delete kar do
+                    fs.rmSync('./auth_info', { recursive: true, force: true });
+                }
             } else if (connection === 'open') {
                 botReady = true;
                 qrCodeUrl = null;
@@ -47,7 +56,6 @@ async function startBot() {
             if (type !== 'notify') return;
             const m = messages[0];
             
-            // Khud ke messages aur bina API key wale ignore
             if (!m.message || m.key.fromMe || !geminiApiKey) return;
 
             const text = m.message.conversation || m.message.extendedTextMessage?.text;
@@ -61,9 +69,9 @@ async function startBot() {
                 await new Promise(r => setTimeout(r, 2000));
                 await sock.readMessages([m.key]);
 
-                // 🛠️ DEBUG TEST: Pata karne ke liye ki WhatsApp send chal raha hai ya nahi
+                // 🛠️ PING TEST: Check karne ke liye bot chal raha hai ya nahi
                 if (text.toLowerCase() === '!ping') {
-                    await sock.sendMessage(remoteJid, { text: 'Pong! 🟢 Bot ka WhatsApp system bilkul sahi chal raha hai.' }, { quoted: m });
+                    await sock.sendMessage(remoteJid, { text: 'Pong! 🟢 Bot ekdum mast chal raha hai.' }, { quoted: m });
                     return;
                 }
 
@@ -71,9 +79,7 @@ async function startBot() {
                 await sock.sendPresenceUpdate('composing', remoteJid);
                 
                 let replyText = "";
-                
                 try {
-                    // 3. AI se reply maangna
                     const genAI = new GoogleGenerativeAI(geminiApiKey);
                     const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
                     
@@ -81,21 +87,18 @@ async function startBot() {
                     
                     const result = await model.generateContent(prompt);
                     replyText = result.response.text().trim().replace(/^["']|["']$/g, '');
-                    
                 } catch (aiError) {
                     console.error('AI Error:', aiError);
-                    // ⚠️ AGAR API KHARAB HUI TOH YE MESSAGE JAYEGA
-                    replyText = "⚠️ Gemini API Error: Bhai teri Gemini API key kaam nahi kar rahi hai. Ya toh key galat copy hui hai, ya uski limit cross ho gayi hai.";
+                    replyText = "⚠️ Gemini API Error: API key check kar bhai, kaam nahi kar rahi hai.";
                 }
 
-                // 4. Insaan jaisa rukna aur message bhejna
+                // 3. Message bhejna
                 await new Promise(r => setTimeout(r, 2000));
                 await sock.sendMessage(remoteJid, { text: replyText }, { quoted: m });
                 
             } catch (e) {
                 console.error('WhatsApp Error:', e);
             } finally {
-                // 5. Typing off
                 await sock.sendPresenceUpdate('paused', remoteJid);
             }
         });
@@ -140,7 +143,7 @@ app.get('/', (req, res) => {
 });
 
 app.post('/save-api', (req, res) => {
-    geminiApiKey = req.body.apikey.trim(); // Space hatane ke liye trim lagaya hai
+    geminiApiKey = req.body.apikey.trim();
     startBot(); 
     res.redirect('/');
 });
@@ -148,22 +151,20 @@ app.post('/save-api', (req, res) => {
 app.post('/pair', async (req, res) => {
     const phone = req.body.phone.replace(/[^0-9]/g, '');
     try {
-        if (!sock) return res.send("<center><h3>Bot start nahi hua, wapas jaakar API key daalein.</h3><a href='/'>Back</a></center>");
+        // YEH HAI FIX: Agar connection timeout ho gaya ho, toh fresh restart karke code mangega
+        if (!sock || !qrCodeUrl) {
+            startBot();
+            await new Promise(r => setTimeout(r, 3000));
+        }
         
-        const delay = (ms) => new Promise(res => setTimeout(res, ms));
         let code;
-        
         try {
-            await delay(1500); 
             code = await sock.requestPairingCode(phone);
         } catch (err) {
-            if (err.message.includes('Closed') || err.message.includes('closed')) {
-                startBot();
-                await delay(4000); 
-                code = await sock.requestPairingCode(phone);
-            } else {
-                throw err;
-            }
+            // Ek aur retry chance
+            startBot();
+            await new Promise(r => setTimeout(r, 4000));
+            code = await sock.requestPairingCode(phone);
         }
         
         const formattedCode = code.match(/.{1,4}/g).join('-');
@@ -178,7 +179,7 @@ app.post('/pair', async (req, res) => {
             </div>
         `);
     } catch (err) {
-        res.send(`<center><h3 style="color: red;">Error: ${err.message}</h3><p>Page refresh karke dobara try karein.</p><a href="/">Back</a></center>`);
+        res.send(`<center><h3 style="color: red;">Error: System Timeout. Page refresh karke dobara number daalein.</h3><a href="/">Back</a></center>`);
     }
 });
 
